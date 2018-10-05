@@ -25,7 +25,7 @@ DONE
 1. python setup.py install
 1. python test.py
 
-## lisence
+## license
 
 Boost Software License - Version 1.0 - August 17th, 2003
 
