@@ -7,6 +7,8 @@ setup(name=libname,
           libname,
           [libname + '.cpp'],
           libraries=["cusolver"],
+          extra_compile_args={'cxx': ['-g', '-DDEBUG'],
+                              'nvcc': ['-O2']}
           # extra_compile_args=["-fPIC"]
       )],
       cmdclass={'build_ext': BuildExtension})
