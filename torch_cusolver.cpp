@@ -1,14 +1,22 @@
+/// TODO: info check
+
 #include <torch/torch.h>
 //#undef NDEBUG
 
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <algorithm>
+#include <vector>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cusolver_common.h>
 #include <cusolverDn.h>
+
+// #include <thrust/host_vector.h>
+// #include <thrust/device_ptr.h>
+
 
 // #include <ATen/CUDAStream.h>
 
@@ -222,52 +230,99 @@ namespace torch_cusolver
 
     // solve U S V = svd(A)  a.k.a. syevj, where A (b, m, n), U (b, m, m), S (b, min(m, n)), V (b, n, n)
     // see also https://docs.nvidia.com/cuda/cusolver/index.html#batchgesvdj-example1
-    std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_svd(at::Tensor a, bool in_place, double tol=1e-7, int max_sweeps=100)
+    std::tuple<at::Tensor, at::Tensor, at::Tensor>
+    batch_svd(at::Tensor a, bool is_sort, double tol=1e-7, int max_sweeps=100)
     {
         AT_CHECK(a.is_cuda(), "only cuda tensor is supported");
         AT_CHECK(a.dtype() == at::kFloat, "only float is supported");
 
         auto handle_ptr = unique_allocate(cusolverDnCreate, cusolverDnDestroy);
-        auto A = in_place ? a.contiguous() : a.clone();
-        auto batch_size = A.size(0);
-        auto m = A.size(1);
+        const auto A = a.contiguous();
+        const auto batch_size = A.size(0);
+        const auto m = A.size(1);
         AT_CHECK(m <= 32, "matrix row should be <= 32");
-        auto n = A.size(2);
+        const auto n = A.size(2);
         AT_CHECK(n <= 32, "matrix col should be <= 32");
-        auto lda = m;
-        auto d_A = A.data<float>();
-        auto minmn = std::min(m, n);
+        const auto lda = m;
+        const auto d_A = A.data<float>();
+        const auto minmn = std::min(m, n);
         auto s = at::empty({batch_size, minmn}, a.type());
         auto d_s = s.data<float>();
         auto U = at::empty({batch_size, m, m}, a.type());
-        auto d_U = U.data<float>();
-        auto ldu = m;
+        const auto d_U = U.data<float>();
+        const auto ldu = m;
         auto V = at::empty({batch_size, n, n}, a.type());
-        auto d_V = V.data<float>();
-        auto ldv = n;
-        auto info_ptr = unique_cuda_ptr<int>(batch_size);
-        //auto params = unique_allocate();
+        const auto d_V = V.data<float>();
+        const auto ldv = n;
+
+        auto params = unique_allocate(cusolverDnCreateGesvdjInfo, cusolverDnDestroyGesvdjInfo);
+        auto status = cusolverDnXgesvdjSetTolerance(params.get(), tol);
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
+        status = cusolverDnXgesvdjSetMaxSweeps(params.get(), max_sweeps);
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
+        status = cusolverDnXgesvdjSetSortEig(params.get(), is_sort);
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
+
         auto jobz = CUSOLVER_EIG_MODE_VECTOR; // compute eigenvalues and eigenvectors
-
         int lwork;
-        // auto status_buffer = cusolverDnSgesvdjBatched_bufferSize(
-        //     handle_ptr.get(),
-        //     jobz,
-        //     m,
-        //     n,
-        //     d_A,
-        //     lda,
-        //     d_s,
-        //     d_U,
-        //     ldu,
-        //     d_V,
-        //     ldv,
-        //     &lwork,
-        //     gesvdjInfo_t params,
-        //     int batchSize);
-        // AT_CHECK(CUSOLVER_STATUS_SUCCESS == status_buffer);
+        auto status_buffer = cusolverDnSgesvdjBatched_bufferSize(
+            handle_ptr.get(),
+            jobz,
+            m,
+            n,
+            d_A,
+            lda,
+            d_s,
+            d_U,
+            ldu,
+            d_V,
+            ldv,
+            &lwork,
+            params.get(),
+            batch_size);
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status_buffer);
+        auto work_ptr = unique_cuda_ptr<float>(lwork);
+        auto info_ptr = unique_cuda_ptr<int>(batch_size);
+        status = cusolverDnSgesvdjBatched(
+            handle_ptr.get(),
+            jobz,
+            m,
+            n,
+            d_A,
+            lda,
+            d_s,
+            d_U,
+            ldu,
+            d_V,
+            ldv,
+            work_ptr.get(),
+            lwork,
+            info_ptr.get(),
+            params.get(),
+            batch_size
+            );
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
 
+        std::vector<int> hinfo(batch_size);
+        auto status_memcpy = cudaMemcpy(hinfo.data(), info_ptr.get(), sizeof(int) * batch_size, cudaMemcpyDeviceToHost);
+        AT_CHECK(cudaSuccess == status_memcpy);
 
+        for(int i = 0 ; i < batch_size; ++i)
+        {
+            if ( 0 == hinfo[i] )
+            {
+                continue;
+            }
+            else if ( 0 > hinfo[i] )
+            {
+                printf("Error: %d-th parameter is wrong \n", -hinfo[i]);
+                AT_CHECK(false);
+            }
+            else
+            {
+                printf("WARNING: matrix %d, info = %d : Jacobi method does not converge \n", i, hinfo[i] );
+            }
+        }
         return std::make_tuple(U, s, V);
     }
 
@@ -284,4 +339,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "cusolver based batched eigh implementation");
     m.def("cusolver_generalized_eigh", &torch_cusolver::generalized_symmetric_eigenvalue_solve,
           "cusolver based generalized eigh implementation");
+    m.def("cusolver_batch_svd", &torch_cusolver::batch_svd,
+          "cusolver based batch svd implementation");
 }
