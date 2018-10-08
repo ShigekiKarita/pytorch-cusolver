@@ -14,7 +14,7 @@
 
 namespace torch_cusolver
 {
-    template<int success, class T, class Status> // , class A = Status(*)(P), class D = Status(*)(T)>
+    template<int success = CUSOLVER_STATUS_SUCCESS, class T, class Status> // , class A = Status(*)(P), class D = Status(*)(T)>
     std::unique_ptr<T, Status(*)(T*)> unique_allocate(Status(allocator)(T**),  Status(deleter)(T*))
     {
         T* ptr;
@@ -43,7 +43,7 @@ namespace torch_cusolver
         // https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/cuda/CUDAContext.h
 
         // initialization
-        auto handle_ptr = unique_allocate<CUSOLVER_STATUS_SUCCESS>(cusolverDnCreate, cusolverDnDestroy);
+        auto handle_ptr = unique_allocate(cusolverDnCreate, cusolverDnDestroy);
         // TODO use non blocking stream?
         auto batch_size = a.size(0);
         auto m = a.size(2);
@@ -57,7 +57,7 @@ namespace torch_cusolver
         auto uplo = use_lower ? CUBLAS_FILL_MODE_LOWER : CUBLAS_FILL_MODE_UPPER;
 
         // configure
-        auto param_ptr = unique_allocate<CUSOLVER_STATUS_SUCCESS>(cusolverDnCreateSyevjInfo, cusolverDnDestroySyevjInfo);
+        auto param_ptr = unique_allocate(cusolverDnCreateSyevjInfo, cusolverDnDestroySyevjInfo);
         auto syevj_params = param_ptr.get();
         /* default value of tolerance is machine zero */
         auto status = cusolverDnXsyevjSetTolerance(syevj_params, tol);
@@ -114,7 +114,7 @@ namespace torch_cusolver
         at::Tensor a, bool in_place_a, at::Tensor b, bool in_place_b,
         bool use_jacob, double tol=1e-7, int max_sweeps=100
         ) {
-        auto handle_ptr = unique_allocate<CUSOLVER_STATUS_SUCCESS>(cusolverDnCreate, cusolverDnDestroy);
+        auto handle_ptr = unique_allocate(cusolverDnCreate, cusolverDnDestroy);
 
         // step 1: copy A and B to device
         // FIXME is this V/B should be contiguous?
