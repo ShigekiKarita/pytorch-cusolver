@@ -34,9 +34,10 @@ B = torch.cuda.FloatTensor(
      [3, 5, 10]])
 w_expect = torch.cuda.FloatTensor([0.158660256604, 0.370751508101882, 0.6])
 
-for jacob in [True, False]:
-    w, V, L = torch_cusolver.cusolver_generalized_eigh(A, False, B, False, jacob, 1e-7, 100)
-    torch.testing.assert_allclose(w, w_expect)
-    torch.testing.assert_allclose(V.mm(B).mm(V.t()), torch.eye(A.shape[0], device=A.device))
-    for i in range(3):
-        torch.testing.assert_allclose(A.matmul(V[i]), B.matmul(V[i]) * w[i])
+for upper in [True, False]:
+    for jacob in [True, False]:
+        w, V, L = torch_cusolver.cusolver_generalized_eigh(A, False, B, False, upper, jacob, 1e-7, 100)
+        torch.testing.assert_allclose(w, w_expect)
+        torch.testing.assert_allclose(V.mm(B).mm(V.t()), torch.eye(A.shape[0], device=A.device))
+        for i in range(3):
+            torch.testing.assert_allclose(A.matmul(V[i]), B.matmul(V[i]) * w[i])

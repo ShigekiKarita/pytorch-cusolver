@@ -112,7 +112,7 @@ namespace torch_cusolver
     std::tuple<at::Tensor, at::Tensor, at::Tensor>
     generalized_symmetric_eigenvalue_solve(
         at::Tensor a, bool in_place_a, at::Tensor b, bool in_place_b,
-        bool use_jacob, double tol=1e-7, int max_sweeps=100
+        bool use_upper, bool use_jacob, double tol=1e-7, int max_sweeps=100
         ) {
         auto handle_ptr = unique_allocate(cusolverDnCreate, cusolverDnDestroy);
 
@@ -134,7 +134,7 @@ namespace torch_cusolver
 
         cusolverEigType_t itype = CUSOLVER_EIG_TYPE_1; // A V = w B V
         cusolverEigMode_t jobz = CUSOLVER_EIG_MODE_VECTOR; // compute eigenvalues and eigenvectors
-        cublasFillMode_t uplo = CUBLAS_FILL_MODE_UPPER;
+        cublasFillMode_t uplo = use_upper ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
 
         if (use_jacob)
         {
@@ -177,8 +177,6 @@ namespace torch_cusolver
                 lwork,
                 info_ptr.get(),
                 syevj_params);
-            // auto status_sync = cudaDeviceSynchronize();
-            // assert(cudaSuccess == status_sync);
             assert(CUSOLVER_STATUS_SUCCESS == status_compute);
         }
         else
@@ -212,21 +210,54 @@ namespace torch_cusolver
                 work_ptr.get(),
                 lwork,
                 info_ptr.get());
-            // cudaStat1 = cudaDeviceSynchronize();
-            // assert(cudaSuccess == cudaStat1);
             assert(CUSOLVER_STATUS_SUCCESS == cusolver_status);
         }
         return std::make_tuple(w, V, B_LU);
     }
 
-    // std::tuple<Tensor, Tensor, Tensor> batch_svd(Tensor x)
-    // {
-    //     // free
-    //     if (dev_info) cudaFree(dev_info);
-    //     if (d_work) cudaFree(d_work);
-    //     if (cusolverH) cusolverDnDestroy(cusolverH);
-    //     return std::make_tuple(w, V, B_LU);
-    // }
+    // solve L S U = svd(A)  a.k.a. syevj, where A (b, m, m), L (b, m, m), S (b, m), U (b, m, m)
+    // see also https://docs.nvidia.com/cuda/cusolver/index.html#sygvd-example1
+    std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_svd(at::Tensor a, bool in_place, bool use_upper, double tol=1e-7, int max_sweeps=100)
+    {
+        auto handle_ptr = unique_allocate(cusolverDnCreate, cusolverDnDestroy);
+        auto A = in_place ? a.contiguous() : a.clone();
+        auto batch_size = A.size(0);
+        auto m = A.size(1);
+        auto lda = A.stride(1);
+        auto d_A = A.data<float>();
+        auto s = at::empty({batch_size, m}, a.type());
+        auto d_s = s.data<float>();
+        auto L = at::empty({batch_size, m, m}, a.type());
+        auto d_L = L.data<float>();
+        auto U = at::empty({batch_size, m, m}, a.type());
+        auto d_U = U.data<float>();
+        auto info_ptr = unique_cuda_ptr<int>(batch_size);
+
+        cusolverEigMode_t jobz = CUSOLVER_EIG_MODE_VECTOR; // compute eigenvalues and eigenvectors
+        cublasFillMode_t uplo = use_upper ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
+
+        /*
+        auto status_buffer = cusolverDnSgesvdjBatched_bufferSize(
+            handle_ptr.get(),
+            jobz,
+            cusolverEigMode_t jobz,
+            int m,
+            int n,
+            const float *A,
+            int lda,
+            const float *S,
+            const float *U,
+            int ldu,
+            const float *V,
+            int ldv,
+            int *lwork,
+            gesvdjInfo_t params,
+            int batchSize);
+        assert(CUSOLVER_STATUS_SUCCESS == status_buffer);
+        */
+
+        return std::make_tuple(L, s, U);
+    }
 
     // batch_potrf
 
