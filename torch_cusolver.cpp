@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <memory>
+#include <algorithm>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -41,17 +42,17 @@ namespace torch_cusolver
         // https://github.com/torch/cutorch/blob/master/lib/THC/THCGeneral.h.in
         // https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/cuda/CUDAContext.h
 
+        AT_CHECK(a.is_cuda(), "only cuda tensor is supported");
+        AT_CHECK(a.dtype() == at::kFloat, "only float is supported");
         // initialization
         auto handle_ptr = unique_allocate(cusolverDnCreate, cusolverDnDestroy);
         // TODO use non blocking stream?
         auto batch_size = a.size(0);
         auto m = a.size(2);
         AT_CHECK(m <= 32, "matrix row/col should be <= 32");
-        auto lda = a.stride(1);
         auto w = at::empty({a.size(0), a.size(2)}, a.type());
-        // C++ to C API
-        // FIXME is this V should be contiguous?
         auto V = in_place ? a.contiguous() : a.clone();
+        auto lda = V.stride(1);
         auto d_V = V.data<float>();
         auto d_W = w.data<float>();
         auto uplo = use_lower ? CUBLAS_FILL_MODE_LOWER : CUBLAS_FILL_MODE_UPPER;
@@ -114,19 +115,23 @@ namespace torch_cusolver
         at::Tensor a, bool in_place_a, at::Tensor b, bool in_place_b,
         bool use_upper, bool use_jacob, double tol=1e-7, int max_sweeps=100
         ) {
+        AT_CHECK(a.is_cuda(), "only cuda tensor for a is supported");
+        AT_CHECK(a.dtype() == at::kFloat, "only float for a is supported");
+        AT_CHECK(b.is_cuda(), "only cuda tensor for b is supported");
+        AT_CHECK(b.dtype() == at::kFloat, "only float for b is supported");
+
         auto handle_ptr = unique_allocate(cusolverDnCreate, cusolverDnDestroy);
 
         // step 1: copy A and B to device
-        // FIXME is this V/B should be contiguous?
         auto m = a.size(0);
-        auto lda = a.stride(0);
-        auto ldb = b.stride(0);
         // NOTE: V will be overwritten from A to orthonormal eigenvectors
         auto V = in_place_a ? a.contiguous() : a.clone();
         auto d_A = V.data<float>();
+        auto lda = V.stride(0);
         // NOTE: B_ will be overwritten from B to LU-Choresky factorization
         auto B_LU = in_place_b ? b.contiguous() : b.clone();
         auto d_B = B_LU.data<float>();
+        auto ldb = B_LU.stride(0);
         // NOTE: w will be sorted
         auto w = at::empty({m}, a.type());
         auto d_W = w.data<float>();
@@ -215,10 +220,13 @@ namespace torch_cusolver
         return std::make_tuple(w, V, B_LU);
     }
 
-    // solve L S U = svd(A)  a.k.a. syevj, where A (b, m, m), L (b, m, m), S (b, m), U (b, m, m)
-    // see also https://docs.nvidia.com/cuda/cusolver/index.html#sygvd-example1
-    std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_svd(at::Tensor a, bool in_place, bool use_upper, double tol=1e-7, int max_sweeps=100)
+    // solve U S V = svd(A)  a.k.a. syevj, where A (b, m, n), U (b, m, m), S (b, min(m, n)), V (b, n, n)
+    // see also https://docs.nvidia.com/cuda/cusolver/index.html#batchgesvdj-example1
+    std::tuple<at::Tensor, at::Tensor, at::Tensor> batch_svd(at::Tensor a, bool in_place, double tol=1e-7, int max_sweeps=100)
     {
+        AT_CHECK(a.is_cuda(), "only cuda tensor is supported");
+        AT_CHECK(a.dtype() == at::kFloat, "only float is supported");
+
         auto handle_ptr = unique_allocate(cusolverDnCreate, cusolverDnDestroy);
         auto A = in_place ? a.contiguous() : a.clone();
         auto batch_size = A.size(0);
@@ -226,38 +234,41 @@ namespace torch_cusolver
         AT_CHECK(m <= 32, "matrix row should be <= 32");
         auto n = A.size(2);
         AT_CHECK(n <= 32, "matrix col should be <= 32");
-        auto lda = A.stride(1);
+        auto lda = m;
         auto d_A = A.data<float>();
-        auto s = at::empty({batch_size, m}, a.type());
+        auto minmn = std::min(m, n);
+        auto s = at::empty({batch_size, minmn}, a.type());
         auto d_s = s.data<float>();
-        auto L = at::empty({batch_size, m, m}, a.type());
-        auto d_L = L.data<float>();
         auto U = at::empty({batch_size, m, m}, a.type());
         auto d_U = U.data<float>();
+        auto ldu = m;
+        auto V = at::empty({batch_size, n, n}, a.type());
+        auto d_V = V.data<float>();
+        auto ldv = n;
         auto info_ptr = unique_cuda_ptr<int>(batch_size);
+        //auto params = unique_allocate();
+        auto jobz = CUSOLVER_EIG_MODE_VECTOR; // compute eigenvalues and eigenvectors
 
-        cusolverEigMode_t jobz = CUSOLVER_EIG_MODE_VECTOR; // compute eigenvalues and eigenvectors
-        cublasFillMode_t uplo = use_upper ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
+        int lwork;
         // auto status_buffer = cusolverDnSgesvdjBatched_bufferSize(
         //     handle_ptr.get(),
         //     jobz,
-        //     A.size
-        //     int m,
-        //     int n,
-        //     const float *A,
-        //     int lda,
-        //     const float *S,
-        //     const float *U,
-        //     int ldu,
-        //     const float *V,
-        //     int ldv,
-        //     int *lwork,
+        //     m,
+        //     n,
+        //     d_A,
+        //     lda,
+        //     d_s,
+        //     d_U,
+        //     ldu,
+        //     d_V,
+        //     ldv,
+        //     &lwork,
         //     gesvdjInfo_t params,
         //     int batchSize);
         // AT_CHECK(CUSOLVER_STATUS_SUCCESS == status_buffer);
 
 
-        return std::make_tuple(L, s, U);
+        return std::make_tuple(U, s, V);
     }
 
     // batch_potrf
