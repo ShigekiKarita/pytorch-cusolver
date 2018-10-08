@@ -6,12 +6,12 @@ TODO
 
 - wrap generalized eigen value decompositon (sygvj)
 - CPU/CUDA uniformed interface
-- autograd for syevjBatched, sygvj
 
 DONE
 
-- wrap batched eigen value decompositon (sygvjBatched)
-
+- wrap batch eigen value decompositon (cusolver.syevjBatched)
+- wrap generalized eigen value decompositon (cusolver.sygvj)
+- wrap batch square matrix inversion (cublas.matinvBatched)
 
 ## requirements
 
@@ -24,6 +24,9 @@ DONE
 1. emacs torch_cusolver.cpp (work on TODO)
 1. python setup.py install
 1. python test.py
+
+(optional)
+1. create autograd function at https://github.com/ShigekiKarita/pytorch-autograd-solver
 
 ## license
 

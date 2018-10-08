@@ -1,6 +1,7 @@
-/// TODO: info check
+/// TODO: support double?
 
 #include <torch/torch.h>
+#include <THC/THC.h>
 //#undef NDEBUG
 
 #include <cstdio>
@@ -20,8 +21,35 @@
 
 // #include <ATen/CUDAStream.h>
 
+// THCState *state;
+
 namespace torch_cusolver
 {
+    void check_jacobi(int* info_ptr, int batch_size)
+    {
+        std::vector<int> hinfo(batch_size);
+        auto status_memcpy = cudaMemcpy(hinfo.data(), info_ptr, sizeof(int) * batch_size, cudaMemcpyDeviceToHost);
+        AT_CHECK(cudaSuccess == status_memcpy);
+
+        for(int i = 0 ; i < batch_size; ++i)
+        {
+            if ( 0 == hinfo[i] )
+            {
+                continue;
+            }
+            else if ( 0 > hinfo[i] )
+            {
+                printf("Error: %d-th parameter is wrong \n", -hinfo[i]);
+                AT_CHECK(false);
+            }
+            else
+            {
+                printf("WARNING: matrix %d, info = %d : Jacobi method does not converge \n", i, hinfo[i] );
+            }
+        }
+
+    }
+
     template<int success = CUSOLVER_STATUS_SUCCESS, class T, class Status> // , class A = Status(*)(P), class D = Status(*)(T)>
     std::unique_ptr<T, Status(*)(T*)> unique_allocate(Status(allocator)(T**),  Status(deleter)(T*))
     {
@@ -112,6 +140,7 @@ namespace torch_cusolver
             syevj_params,
             batch_size
             );
+        check_jacobi(info_ptr.get(), batch_size);
         AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
         return std::make_tuple(w, V);
     }
@@ -225,6 +254,7 @@ namespace torch_cusolver
                 info_ptr.get());
             AT_CHECK(CUSOLVER_STATUS_SUCCESS == cusolver_status);
         }
+        check_jacobi(info_ptr.get(), 1);
         return std::make_tuple(w, V, B_LU);
     }
 
@@ -329,6 +359,56 @@ namespace torch_cusolver
     // batch_potrf
 
     // batch_potrs
+
+    // from cublas (NOTE: use aten cublas handler)
+    // batch_matinv
+    at::Tensor batch_matinv(const at::Tensor& a) {
+        AT_CHECK(a.is_cuda(), "only cuda tensor is supported");
+        AT_CHECK(a.dtype() == at::kFloat, "only float is supported");
+
+        const auto batch_size = a.size(0);
+        const auto m = a.size(1);
+        AT_CHECK(m <= 32, "matrix row should be <= 32");
+        const auto n = a.size(2);
+        AT_CHECK(n == m, "should be col == row");
+        const auto lda = a.stride(1);
+        auto inv = at::empty_like(a); // ({batch_size, n, n}, a.type());
+        auto lda_inv = inv.stride(1);
+        auto info_ptr = unique_cuda_ptr<int>(batch_size);
+        std::vector<const float*> a_pointers(batch_size);
+        std::vector<float*> inv_pointers(batch_size);
+        for (int i = 0; i < batch_size; ++i)
+        {
+            a_pointers[i] = a.select(0, i).data<float>();
+            inv_pointers[i] = inv.select(0, i).data<float>();
+        }
+        auto dev_a_ptrs = unique_cuda_ptr<const float*>(batch_size);
+        auto dev_inv_ptrs = unique_cuda_ptr<float*>(batch_size);
+        auto status_memcpy = cudaMemcpy(dev_a_ptrs.get(), a_pointers.data(),
+                                        sizeof(float*) * batch_size, cudaMemcpyHostToDevice);
+        AT_CHECK(cudaSuccess == status_memcpy);
+        status_memcpy = cudaMemcpy(dev_inv_ptrs.get(), inv_pointers.data(),
+                                   sizeof(float*) * batch_size, cudaMemcpyHostToDevice);
+        AT_CHECK(cudaSuccess == status_memcpy);
+        auto status = cublasSmatinvBatched(
+            // at::cuda::getCurrentCUDABlasHandle(),
+            THCState_getCurrentBlasHandle(at::globalContext().getTHCState()),
+            n,
+            // a_pointers.data(),
+            dev_a_ptrs.get(),
+            lda,
+            // inv_pointers.data(),
+            dev_inv_ptrs.get(),
+            lda_inv,
+            info_ptr.get(),
+            batch_size);
+        AT_CHECK(status == CUBLAS_STATUS_SUCCESS);
+        return inv;
+    }
+    // batch_getrf
+    // batch_getrs
+    // batch_getri
+    // batch_inv from https://github.com/chainer/chainer/blob/v4.5.0/chainer/functions/math/inv.py#L129
 } // namespace torch_cusolver
 
 
@@ -341,4 +421,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "cusolver based generalized eigh implementation");
     m.def("cusolver_batch_svd", &torch_cusolver::batch_svd,
           "cusolver based batch svd implementation");
+    m.def("cusolver_batch_matinv", &torch_cusolver::batch_matinv,
+          "cusolver based batch matrix inverse implementation");
 }
