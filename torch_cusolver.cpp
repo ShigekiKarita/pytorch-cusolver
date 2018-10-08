@@ -3,6 +3,7 @@
 
 #include <assert.h>
 #include <iostream>
+#include <memory>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -11,7 +12,25 @@
 
 // #include <ATen/CUDAStream.h>
 
-namespace torch_cusolver {
+namespace torch_cusolver
+{
+    template<int success, class T, class Status> // , class A = Status(*)(P), class D = Status(*)(T)>
+    std::unique_ptr<T, Status(*)(T*)> unique_allocate(Status(allocator)(T**),  Status(deleter)(T*))
+    {
+        T* ptr;
+        auto stat = allocator(&ptr);
+        assert(stat == success);
+        return {ptr, deleter};
+    }
+
+    template <class T>
+    std::unique_ptr<T, decltype(&cudaFree)> unique_cuda_ptr(size_t len) {
+        T* ptr;
+        auto stat = cudaMalloc(&ptr, sizeof(T) * len);
+        assert(stat == cudaSuccess);
+        return {ptr, cudaFree};
+    }
+
     // solve AV = wV  a.k.a. syevj, where A (batch, m, m), V (batch, m, m), w (batch, m)
     // see also https://docs.nvidia.com/cuda/cusolver/index.html#batchsyevj-example1
     std::tuple<at::Tensor, at::Tensor> batch_symmetric_eigenvalue_solve(
@@ -24,10 +43,7 @@ namespace torch_cusolver {
         // https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/cuda/CUDAContext.h
 
         // initialization
-        cusolverDnHandle_t handle;
-        cusolverStatus_t status;
-        status = cusolverDnCreate(&handle);
-        assert(status == CUSOLVER_STATUS_SUCCESS);
+        auto handle_ptr = unique_allocate<CUSOLVER_STATUS_SUCCESS>(cusolverDnCreate, cusolverDnDestroy);
         // TODO use non blocking stream?
         auto batch_size = a.size(0);
         auto m = a.size(2);
@@ -41,11 +57,10 @@ namespace torch_cusolver {
         auto uplo = use_lower ? CUBLAS_FILL_MODE_LOWER : CUBLAS_FILL_MODE_UPPER;
 
         // configure
-        syevjInfo_t syevj_params;
-        status = cusolverDnCreateSyevjInfo(&syevj_params);
-        assert(CUSOLVER_STATUS_SUCCESS == status);
+        auto param_ptr = unique_allocate<CUSOLVER_STATUS_SUCCESS>(cusolverDnCreateSyevjInfo, cusolverDnDestroySyevjInfo);
+        auto syevj_params = param_ptr.get();
         /* default value of tolerance is machine zero */
-        status = cusolverDnXsyevjSetTolerance(syevj_params, tol);
+        auto status = cusolverDnXsyevjSetTolerance(syevj_params, tol);
         assert(CUSOLVER_STATUS_SUCCESS == status);
         /* default value of max. sweeps is 100 */
         status = cusolverDnXsyevjSetMaxSweeps(syevj_params, max_sweeps);
@@ -58,7 +73,7 @@ namespace torch_cusolver {
         // query working space of syevjBatched
         int lwork;
         status = cusolverDnSsyevjBatched_bufferSize(
-            handle,
+            handle_ptr.get(),
             CUSOLVER_EIG_MODE_VECTOR,
             uplo,
             m,
@@ -70,34 +85,25 @@ namespace torch_cusolver {
             batch_size
             );
         assert(CUSOLVER_STATUS_SUCCESS == status);
-        float* d_work;
-        auto stat = cudaMalloc(&d_work, sizeof(float) * lwork);
-        assert(cudaSuccess == stat);
-        int* d_info;
-        auto status_info = cudaMalloc(&d_info, sizeof(int) * batch_size);
-        assert(cudaSuccess == status_info);
+        auto work_ptr = unique_cuda_ptr<float>(lwork);
+        auto info_ptr = unique_cuda_ptr<int>(batch_size);
 
         // compute eigenvalues/vectors
         status = cusolverDnSsyevjBatched(
-            handle,
+            handle_ptr.get(),
             CUSOLVER_EIG_MODE_VECTOR,
             uplo,
             m,
             d_V,
             lda,
             d_W,
-            d_work,
+            work_ptr.get(),
             lwork,
-            d_info,
+            info_ptr.get(),
             syevj_params,
             batch_size
             );
         assert(CUSOLVER_STATUS_SUCCESS == status);
-
-        // free
-        if (d_info ) { cudaFree(d_info); }
-        if (d_work ) { cudaFree(d_work); }
-        if (handle) { cusolverDnDestroy(handle); }
         return std::make_tuple(w, V);
     }
 
@@ -108,10 +114,7 @@ namespace torch_cusolver {
         at::Tensor a, bool in_place_a, at::Tensor b, bool in_place_b,
         bool use_jacob, double tol=1e-7, int max_sweeps=100
         ) {
-        // step 0: create cusolver/cublas handle
-        cusolverDnHandle_t cusolverH;
-        auto status_create = cusolverDnCreate(&cusolverH);
-        assert(CUSOLVER_STATUS_SUCCESS == status_create);
+        auto handle_ptr = unique_allocate<CUSOLVER_STATUS_SUCCESS>(cusolverDnCreate, cusolverDnDestroy);
 
         // step 1: copy A and B to device
         // FIXME is this V/B should be contiguous?
@@ -127,35 +130,25 @@ namespace torch_cusolver {
         // NOTE: w will be sorted
         auto w = at::empty({m}, a.type());
         auto d_W = w.data<float>();
-        int* dev_info;
-        auto stat_info = cudaMalloc(&dev_info, sizeof(int)); // should be heap allocated?
-        assert(cudaSuccess == stat_info);
+        auto info_ptr = unique_cuda_ptr<int>(1);
 
         cusolverEigType_t itype = CUSOLVER_EIG_TYPE_1; // A V = w B V
         cusolverEigMode_t jobz = CUSOLVER_EIG_MODE_VECTOR; // compute eigenvalues and eigenvectors
         cublasFillMode_t uplo = CUBLAS_FILL_MODE_UPPER;
 
-        int* d_info;
-        auto status_info = cudaMalloc(&d_info, sizeof(int));
-        assert(cudaSuccess == status_info);
-        float* d_work;
         if (use_jacob)
         {
-            // step 2. configure
             syevjInfo_t syevj_params;
             auto status_param = cusolverDnCreateSyevjInfo(&syevj_params);
             assert(CUSOLVER_STATUS_SUCCESS == status_param);
-            /* default value of tolerance is machine zero */
             status_param = cusolverDnXsyevjSetTolerance(syevj_params, tol);
             assert(CUSOLVER_STATUS_SUCCESS == status_param);
-            /* default value of max. sweeps is 100 */
             status_param = cusolverDnXsyevjSetMaxSweeps(syevj_params, max_sweeps);
             assert(CUSOLVER_STATUS_SUCCESS == status_param);
 
-            // step 3: query working space of sygvd
             int lwork;
             auto status_buffer = cusolverDnSsygvj_bufferSize(
-                cusolverH,
+                handle_ptr.get(),
                 itype,
                 jobz,
                 uplo,
@@ -168,12 +161,9 @@ namespace torch_cusolver {
                 &lwork,
                 syevj_params);
             assert(status_buffer == CUSOLVER_STATUS_SUCCESS);
-            auto stat_work = cudaMalloc(&d_work, sizeof(float)*lwork);
-            assert(cudaSuccess == stat_work);
-
-            // step 4: compute spectrum of (A,B)
+            auto work_ptr = unique_cuda_ptr<float>(lwork);
             auto status_compute = cusolverDnSsygvj(
-                cusolverH,
+                handle_ptr.get(),
                 itype,
                 jobz,
                 uplo,
@@ -183,19 +173,19 @@ namespace torch_cusolver {
                 d_B,
                 ldb,
                 d_W,
-                d_work,
+                work_ptr.get(),
                 lwork,
-                d_info,
+                info_ptr.get(),
                 syevj_params);
-            auto status_sync = cudaDeviceSynchronize();
-            assert(cudaSuccess == status_sync);
+            // auto status_sync = cudaDeviceSynchronize();
+            // assert(cudaSuccess == status_sync);
             assert(CUSOLVER_STATUS_SUCCESS == status_compute);
         }
         else
         {
             int lwork;
             auto cusolver_status = cusolverDnSsygvd_bufferSize(
-                cusolverH,
+                handle_ptr.get(),
                 itype,
                 jobz,
                 uplo,
@@ -207,12 +197,9 @@ namespace torch_cusolver {
                 d_W,
                 &lwork);
             assert (cusolver_status == CUSOLVER_STATUS_SUCCESS);
-            auto cudaStat1 = cudaMalloc(&d_work, sizeof(float)*lwork);
-            assert(cudaSuccess == cudaStat1);
-
-            // step 4: compute spectrum of (A,B)
+            auto work_ptr = unique_cuda_ptr<float>(lwork);
             cusolver_status = cusolverDnSsygvd(
-                cusolverH,
+                handle_ptr.get(),
                 itype,
                 jobz,
                 uplo,
@@ -222,20 +209,28 @@ namespace torch_cusolver {
                 d_B,
                 ldb,
                 d_W,
-                d_work,
+                work_ptr.get(),
                 lwork,
-                dev_info);
-            cudaStat1 = cudaDeviceSynchronize();
+                info_ptr.get());
+            // cudaStat1 = cudaDeviceSynchronize();
+            // assert(cudaSuccess == cudaStat1);
             assert(CUSOLVER_STATUS_SUCCESS == cusolver_status);
-            assert(cudaSuccess == cudaStat1);
         }
-
-        // free
-        if (dev_info) cudaFree(dev_info);
-        if (d_work) cudaFree(d_work);
-        if (cusolverH) cusolverDnDestroy(cusolverH);
         return std::make_tuple(w, V, B_LU);
     }
+
+    // std::tuple<Tensor, Tensor, Tensor> batch_svd(Tensor x)
+    // {
+    //     // free
+    //     if (dev_info) cudaFree(dev_info);
+    //     if (d_work) cudaFree(d_work);
+    //     if (cusolverH) cusolverDnDestroy(cusolverH);
+    //     return std::make_tuple(w, V, B_LU);
+    // }
+
+    // batch_potrf
+
+    // batch_potrs
 } // namespace torch_cusolver
 
 
