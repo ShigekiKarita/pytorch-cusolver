@@ -1,7 +1,6 @@
 #include <torch/torch.h>
-#undef NDEBUG
+//#undef NDEBUG
 
-#include <assert.h>
 #include <iostream>
 #include <memory>
 
@@ -19,7 +18,7 @@ namespace torch_cusolver
     {
         T* ptr;
         auto stat = allocator(&ptr);
-        assert(stat == success);
+        AT_CHECK(stat == success);
         return {ptr, deleter};
     }
 
@@ -27,7 +26,7 @@ namespace torch_cusolver
     std::unique_ptr<T, decltype(&cudaFree)> unique_cuda_ptr(size_t len) {
         T* ptr;
         auto stat = cudaMalloc(&ptr, sizeof(T) * len);
-        assert(stat == cudaSuccess);
+        AT_CHECK(stat == cudaSuccess);
         return {ptr, cudaFree};
     }
 
@@ -47,6 +46,7 @@ namespace torch_cusolver
         // TODO use non blocking stream?
         auto batch_size = a.size(0);
         auto m = a.size(2);
+        AT_CHECK(m <= 32, "matrix row/col should be <= 32");
         auto lda = a.stride(1);
         auto w = at::empty({a.size(0), a.size(2)}, a.type());
         // C++ to C API
@@ -61,13 +61,13 @@ namespace torch_cusolver
         auto syevj_params = param_ptr.get();
         /* default value of tolerance is machine zero */
         auto status = cusolverDnXsyevjSetTolerance(syevj_params, tol);
-        assert(CUSOLVER_STATUS_SUCCESS == status);
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
         /* default value of max. sweeps is 100 */
         status = cusolverDnXsyevjSetMaxSweeps(syevj_params, max_sweeps);
-        assert(CUSOLVER_STATUS_SUCCESS == status);
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
         /* disable sorting */
         status = cusolverDnXsyevjSetSortEig(syevj_params, sort_eig);
-        assert(CUSOLVER_STATUS_SUCCESS == status);
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
 
         // FIXME use at::Tensor buffer from arg instead
         // query working space of syevjBatched
@@ -84,7 +84,7 @@ namespace torch_cusolver
             syevj_params,
             batch_size
             );
-        assert(CUSOLVER_STATUS_SUCCESS == status);
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
         auto work_ptr = unique_cuda_ptr<float>(lwork);
         auto info_ptr = unique_cuda_ptr<int>(batch_size);
 
@@ -103,7 +103,7 @@ namespace torch_cusolver
             syevj_params,
             batch_size
             );
-        assert(CUSOLVER_STATUS_SUCCESS == status);
+        AT_CHECK(CUSOLVER_STATUS_SUCCESS == status);
         return std::make_tuple(w, V);
     }
 
@@ -140,11 +140,11 @@ namespace torch_cusolver
         {
             syevjInfo_t syevj_params;
             auto status_param = cusolverDnCreateSyevjInfo(&syevj_params);
-            assert(CUSOLVER_STATUS_SUCCESS == status_param);
+            AT_CHECK(CUSOLVER_STATUS_SUCCESS == status_param);
             status_param = cusolverDnXsyevjSetTolerance(syevj_params, tol);
-            assert(CUSOLVER_STATUS_SUCCESS == status_param);
+            AT_CHECK(CUSOLVER_STATUS_SUCCESS == status_param);
             status_param = cusolverDnXsyevjSetMaxSweeps(syevj_params, max_sweeps);
-            assert(CUSOLVER_STATUS_SUCCESS == status_param);
+            AT_CHECK(CUSOLVER_STATUS_SUCCESS == status_param);
 
             int lwork;
             auto status_buffer = cusolverDnSsygvj_bufferSize(
@@ -160,7 +160,7 @@ namespace torch_cusolver
                 d_W,
                 &lwork,
                 syevj_params);
-            assert(status_buffer == CUSOLVER_STATUS_SUCCESS);
+            AT_CHECK(status_buffer == CUSOLVER_STATUS_SUCCESS);
             auto work_ptr = unique_cuda_ptr<float>(lwork);
             auto status_compute = cusolverDnSsygvj(
                 handle_ptr.get(),
@@ -177,7 +177,7 @@ namespace torch_cusolver
                 lwork,
                 info_ptr.get(),
                 syevj_params);
-            assert(CUSOLVER_STATUS_SUCCESS == status_compute);
+            AT_CHECK(CUSOLVER_STATUS_SUCCESS == status_compute);
         }
         else
         {
@@ -194,7 +194,7 @@ namespace torch_cusolver
                 ldb,
                 d_W,
                 &lwork);
-            assert (cusolver_status == CUSOLVER_STATUS_SUCCESS);
+            AT_CHECK (cusolver_status == CUSOLVER_STATUS_SUCCESS);
             auto work_ptr = unique_cuda_ptr<float>(lwork);
             cusolver_status = cusolverDnSsygvd(
                 handle_ptr.get(),
@@ -210,7 +210,7 @@ namespace torch_cusolver
                 work_ptr.get(),
                 lwork,
                 info_ptr.get());
-            assert(CUSOLVER_STATUS_SUCCESS == cusolver_status);
+            AT_CHECK(CUSOLVER_STATUS_SUCCESS == cusolver_status);
         }
         return std::make_tuple(w, V, B_LU);
     }
@@ -223,6 +223,9 @@ namespace torch_cusolver
         auto A = in_place ? a.contiguous() : a.clone();
         auto batch_size = A.size(0);
         auto m = A.size(1);
+        AT_CHECK(m <= 32, "matrix row should be <= 32");
+        auto n = A.size(2);
+        AT_CHECK(n <= 32, "matrix col should be <= 32");
         auto lda = A.stride(1);
         auto d_A = A.data<float>();
         auto s = at::empty({batch_size, m}, a.type());
@@ -235,26 +238,24 @@ namespace torch_cusolver
 
         cusolverEigMode_t jobz = CUSOLVER_EIG_MODE_VECTOR; // compute eigenvalues and eigenvectors
         cublasFillMode_t uplo = use_upper ? CUBLAS_FILL_MODE_UPPER : CUBLAS_FILL_MODE_LOWER;
+        // auto status_buffer = cusolverDnSgesvdjBatched_bufferSize(
+        //     handle_ptr.get(),
+        //     jobz,
+        //     A.size
+        //     int m,
+        //     int n,
+        //     const float *A,
+        //     int lda,
+        //     const float *S,
+        //     const float *U,
+        //     int ldu,
+        //     const float *V,
+        //     int ldv,
+        //     int *lwork,
+        //     gesvdjInfo_t params,
+        //     int batchSize);
+        // AT_CHECK(CUSOLVER_STATUS_SUCCESS == status_buffer);
 
-        /*
-        auto status_buffer = cusolverDnSgesvdjBatched_bufferSize(
-            handle_ptr.get(),
-            jobz,
-            cusolverEigMode_t jobz,
-            int m,
-            int n,
-            const float *A,
-            int lda,
-            const float *S,
-            const float *U,
-            int ldu,
-            const float *V,
-            int ldv,
-            int *lwork,
-            gesvdjInfo_t params,
-            int batchSize);
-        assert(CUSOLVER_STATUS_SUCCESS == status_buffer);
-        */
 
         return std::make_tuple(L, s, U);
     }

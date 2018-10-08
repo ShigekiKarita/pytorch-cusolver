@@ -3,7 +3,7 @@ import numpy
 import torch
 import torch_cusolver
 
-A = torch.rand(2, 3, 3).cuda()
+A = torch.rand(2, 5, 5).cuda()
 A = A.transpose(1, 2).matmul(A)
 w, V = torch_cusolver.cusolver_batch_eigh(A,
                                           False,
