@@ -6,7 +6,7 @@ setup(name=libname,
       ext_modules=[CppExtension(
           libname,
           [libname + '.cpp'],
-          libraries=["cusolver"],
+          libraries=["cusolver", "cublas"],
           extra_compile_args={'cxx': ['-g', '-DDEBUG'],
                               'nvcc': ['-O2']}
           # extra_compile_args=["-fPIC"]

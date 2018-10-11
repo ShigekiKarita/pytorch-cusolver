@@ -78,7 +78,26 @@ def test_batch_matinv():
         torch.testing.assert_allclose(a[i].mm(ai[i]), torch.eye(a.shape[1], device=a.device))
 
 
+def test_complex_gemm():
+    torch.manual_seed(0)
+    a = torch.randn(4, 3, 2).cuda()
+    b = torch.randn(3, 2, 2).cuda()
+    c = torch_cusolver.cublas_cgemm(a, b)
+
+    for i in range(c.shape[0]):
+        for j in range(c.shape[1]):
+            ai = a[i, :].t()
+            bj = b[:, j].t()
+            # ar * br - ai * bi
+            cr = sum(ai[0] * bj[0] - ai[1] * bj[1])
+            # ai * br + ar * bi
+            ci = sum(ai[1] * bj[0] + ai[0] * bj[1])
+            print("imag", c[i, j, 1].item(), ci.item())
+            torch.testing.assert_allclose(c[i, j, 0], cr)
+            torch.testing.assert_allclose(c[i, j, 1], ci)
+
 test_batch_eigh()
 test_generalized_eigh()
 test_batch_matinv()
 test_batch_svd()
+test_complex_gemm()
