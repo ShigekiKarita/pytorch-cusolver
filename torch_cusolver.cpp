@@ -15,6 +15,8 @@
 #include <cusolver_common.h>
 #include <cusolverDn.h>
 
+#include <mkl.h> // TODO use cblas.h instead?
+
 // #include <thrust/host_vector.h>
 // #include <thrust/device_ptr.h>
 
@@ -87,37 +89,60 @@ namespace torch_cublas
         const cuComplex alpha = {1.0, 0.0};
         const cuComplex beta = {0.0, 0.0};
         AT_CHECK(a.is_contiguous(), "a is not contiguous");
-        AT_CHECK(a.is_cuda(), "only cuda tensor is supported");
         AT_CHECK(a.dtype() == at::kFloat, "only float is supported");
         AT_CHECK(a.dim() == 3, "3-dim complex matrix is supported but a.dim() == ", a.dim());
         AT_CHECK(a.size(2) == 2, "complex matrix a should be a.size(2) == 2 but ", a.size(2));
         AT_CHECK(b.is_contiguous(), "b is not contiguous");
-        AT_CHECK(b.is_cuda(), "only cuda tensor is supported");
         AT_CHECK(b.dtype() == at::kFloat, "only float is supported");
         AT_CHECK(b.dim() == 3, "3-dim complex matrix is supported but b.dim() == ", b.dim());
         AT_CHECK(b.size(2) == 2, "complex matrix b should be a.size(2) == 2 but ", b.size(2));
         AT_CHECK(a.size(1) == b.size(0), "complex matrix is not matched:",
                  "a.size(1) {", a.size(1), "} != b.size(0) {", b.size(0), "}");
+        AT_CHECK(a.is_cuda() == b.is_cuda(), "device is not matched");
 
         if (!c.defined())
         {
             c = at::empty({a.size(0), b.size(1), 2}, a.type());
         }
-        // NOTE: cublas only supports fortran order (transposed A x B -> B^T x A^T)
-        auto status = cublasCgemm(
-            getCurrentCUDABlasHandle(),
-            transa, transb,
-            b.size(1), a.size(0), b.size(0),
-            &alpha,
-            (const cuComplex*) b.data_ptr(), b.stride(0) / 2,
-            (const cuComplex*) a.data_ptr(), a.stride(0) / 2,
-            &beta,
-            (cuComplex*) c.data_ptr(), c.stride(0) / 2
-            );
-        AT_CHECK(status == CUBLAS_STATUS_SUCCESS, cudaGetErrorEnum(status));
+
+        if (a.is_cuda())
+        {
+            // NOTE: cublas only supports fortran order (transposed A x B -> B^T x A^T)
+            auto status = cublasCgemm(
+                getCurrentCUDABlasHandle(),
+                transa, transb,
+                b.size(1), a.size(0), b.size(0),
+                &alpha,
+                (const cuComplex*) b.data_ptr(), b.stride(0) / 2,
+                (const cuComplex*) a.data_ptr(), a.stride(0) / 2,
+                &beta,
+                (cuComplex*) c.data_ptr(), c.stride(0) / 2
+                );
+            AT_CHECK(status == CUBLAS_STATUS_SUCCESS, cudaGetErrorEnum(status));
+        }
+        else
+        {
+            auto transa = 'N';
+            auto transb = 'N';
+            int m = b.size(1);
+            int n = a.size(0);
+            int k = b.size(0);
+            int ldb = b.stride(0) / 2;
+            int lda = a.stride(0) / 2;
+            int ldc = c.stride(0) / 2;
+            // I prefer C++ interface instead of CBLAS
+            cgemm(
+                &transa, &transb,
+                &m, &n, &k,
+                (MKL_Complex8*) &alpha,
+                (const MKL_Complex8*) b.data_ptr(), &ldb,
+                (const MKL_Complex8*) a.data_ptr(), &lda,
+                (MKL_Complex8*) &beta,
+                (MKL_Complex8*) c.data_ptr(), &ldc
+                );
+        }
         return c;
     }
-
 }
 
 namespace torch_cusolver
